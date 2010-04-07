@@ -1,0 +1,112 @@
+#!/usr/bin/perl
+
+package MSH;
+
+use strict;
+use warnings;
+use Expect;
+
+sub new {
+    my $class = shift;
+    bless {@_}, $class;
+}
+
+sub log {
+    my $self = shift;
+    $self->{_log} && print @_;
+}
+
+sub execute {
+    my $self = shift;
+    my @cmd  = @_;
+
+    my $user = $self->{user} || die;
+    my $host = $self->{host} || die;
+    my $pass = $self->{pass};
+    my $cmd = join " ", @cmd;
+    $cmd or die;
+
+    $self->{_log} = 1;
+    $self->log(<<EOF);
+[$user\@$host] CMD: $cmd
+EOF
+
+    my @t = qw(ssh -A);
+    push @t, '-o', 'StrictHostKeyChecking no', "-l", $user, $host, @cmd;
+
+    my $ssh = Expect->spawn(@t)
+      || die "Warning: ssh failed on $host\n";
+    $ssh->log_stdout(0);
+    $ssh->log_file( sub { $self->log(shift) } );
+
+    $ssh->expect(
+        1800,
+        [
+            qr/assword:\s*$/ =>
+              sub {
+                  $self->log("\n");
+                  $self->{_log} = 0;
+                  $ssh->send("$pass\n");
+                  exp_continue;
+              }
+        ],
+        [
+            qr/.+/ =>
+              sub {
+                  $self->{_log} = 1;
+                  exp_continue;
+              }
+        ],
+        [
+            timeout => 
+              sub {
+                  die "timeout.\n"
+              }
+        ],
+    );
+    $ssh->hard_close();
+    print "\n";
+}
+
+
+1;
+
+package main;
+
+use strict;
+use warnings;
+use IO::Prompt;
+use Getopt::Long;
+use String::ShellQuote;
+
+GetOptions(
+    'f=s'      => \my $list,
+    'u|user=s' => \my $user,
+    'd|delay=i' => \my $delay,
+    'p'        => \my $with_passwd,
+);
+
+my @args = shell_quote @ARGV;
+@ARGV=();
+
+my $passwd;
+if ( $with_passwd ) {
+    $passwd = prompt("$user password: ", -echo=>"*");
+    $passwd or die;
+}
+
+open(my $fh, $list);
+my @hosts = <$fh>;
+
+foreach my $host ( @hosts ) {
+    chomp $host;chomp $host;
+
+    my $msh = MSH->new(
+        host => $host,
+        user => $user,
+        pass => $passwd
+    );
+    $msh->execute(@args);
+    sleep $delay if $delay;
+}
+
